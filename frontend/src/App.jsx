@@ -22,6 +22,13 @@ function App() {
   const [inviteLoading, setInviteLoading] = useState(false);
   const [loadingStudents, setLoadingStudents] = useState(false);
 
+  // Student spending limits state (fetched from /api/auth/me)
+  const [limit, setLimit] = useState(null);
+  const [spentStats, setSpentStats] = useState(null);
+
+  // Parent: per-student limit edit forms { [studentId]: { dailyLimit, monthlyLimit, approvalAbove, saving } }
+  const [limitForms, setLimitForms] = useState({});
+
   // Auth form states
   const [loginData, setLoginData] = useState({ email: '', password: '' });
   const [registerData, setRegisterData] = useState({
@@ -44,6 +51,9 @@ function App() {
     setTransactions([]);
     setLinkedStudents([]);
     setPendingInvites([]);
+    setLimit(null);
+    setSpentStats(null);
+    setLimitForms({});
     setTestResult(null);
     setMessage({ text: 'Logged out successfully', type: 'success' });
   }, []);
@@ -61,6 +71,8 @@ function App() {
           setUser(data.user);
           if (data.account) setAccount(data.account);
           if (data.parentAccount) setParentAccount(data.parentAccount);
+          if (data.limit) setLimit(data.limit);
+          if (data.spentStats) setSpentStats(data.spentStats);
         } else {
           handleLogout();
           setMessage({ text: 'Session expired. Please log in again.', type: 'error' });
@@ -237,6 +249,7 @@ function App() {
       setTransferData({ toAccountId: '', amount: '' });
       fetchAccount();
       fetchTransactions();
+      fetchUserProfile(token); // refresh spentStats for student limits
       if (user?.role === 'parent') {
         fetchLinkedStudents();
       }
@@ -347,6 +360,67 @@ function App() {
       fetchLinkedStudents();
     } catch (err) {
       setMessage({ text: err.message, type: 'error' });
+    }
+  };
+
+  // Parent Action: open inline limit editor for a student
+  const initLimitForm = (student) => {
+    setLimitForms((prev) => ({
+      ...prev,
+      [student._id]: {
+        dailyLimit: student.limit?.dailyLimit ?? 100,
+        monthlyLimit: student.limit?.monthlyLimit ?? 500,
+        approvalAbove: student.limit?.approvalAbove ?? 50,
+        saving: false,
+        open: !(prev[student._id]?.open),
+      },
+    }));
+  };
+
+  const updateLimitFormField = (studentId, field, value) => {
+    setLimitForms((prev) => ({
+      ...prev,
+      [studentId]: { ...prev[studentId], [field]: value },
+    }));
+  };
+
+  // Parent Action: save limits for a student
+  const handleSetLimits = async (e, studentId) => {
+    e.preventDefault();
+    const form = limitForms[studentId];
+    if (!form) return;
+    setLimitForms((prev) => ({
+      ...prev,
+      [studentId]: { ...prev[studentId], saving: true },
+    }));
+    try {
+      const res = await fetch(`/api/parent/limits/${studentId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          dailyLimit: Number(form.dailyLimit),
+          monthlyLimit: Number(form.monthlyLimit),
+          approvalAbove: Number(form.approvalAbove),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to save limits');
+      setMessage({ text: `Limits saved for student.`, type: 'success' });
+      // Close form and refresh student list so new limit values appear
+      setLimitForms((prev) => ({
+        ...prev,
+        [studentId]: { ...prev[studentId], saving: false, open: false },
+      }));
+      fetchLinkedStudents();
+    } catch (err) {
+      setMessage({ text: err.message, type: 'error' });
+      setLimitForms((prev) => ({
+        ...prev,
+        [studentId]: { ...prev[studentId], saving: false },
+      }));
     }
   };
 
@@ -579,41 +653,117 @@ function App() {
                   <p className="muted-text">Loading students...</p>
                 ) : linkedStudents.length > 0 ? (
                   <div className="student-list">
-                    {linkedStudents.map((student) => (
-                      <div key={student._id || student.id} className="student-item">
-                        <div className="student-info">
-                          <span className="student-name">{student.name}</span>
-                          <span className="student-email">{student.email}</span>
-                          <span className="student-account-tag">
-                            Acc: {student.account?.id} • Balance: $
-                            {student.account?.balance?.toFixed(2) || '0.00'}
-                          </span>
+                    {linkedStudents.map((student) => {
+                      const lf = limitForms[student._id];
+                      const lim = student.limit;
+                      return (
+                        <div key={student._id || student.id} className="student-item">
+                          <div className="student-info">
+                            <span className="student-name">{student.name}</span>
+                            <span className="student-email">{student.email}</span>
+                            <span className="student-account-tag">
+                              Acc: {student.account?.id} • Balance: $
+                              {student.account?.balance?.toFixed(2) || '0.00'}
+                            </span>
+                            {/* Limits summary row */}
+                            <div className="student-limits-row">
+                              <span className="limit-chip">
+                                Daily: <strong>${lim?.dailyLimit ?? 100}</strong>
+                              </span>
+                              <span className="limit-chip">
+                                Monthly: <strong>${lim?.monthlyLimit ?? 500}</strong>
+                              </span>
+                              <span className="limit-chip">
+                                Approval above: <strong>${lim?.approvalAbove ?? 50}</strong>
+                              </span>
+                            </div>
+                          </div>
+                          <div className="student-item-actions">
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-outline"
+                              onClick={() =>
+                                setTransferData({
+                                  ...transferData,
+                                  toAccountId: student.account?.id || '',
+                                })
+                              }
+                            >
+                              Transfer
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-accent"
+                              onClick={() => initLimitForm(student)}
+                            >
+                              {lf?.open ? 'Close Limits' : 'Set Limits'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-danger-outline"
+                              onClick={() =>
+                                handleUnlinkStudent(student._id || student.id, student.name)
+                              }
+                            >
+                              Unlink
+                            </button>
+                          </div>
+                          {/* Inline limit editor */}
+                          {lf?.open && (
+                            <form
+                              className="limit-edit-form"
+                              onSubmit={(e) => handleSetLimits(e, student._id)}
+                            >
+                              <div className="limit-fields-row">
+                                <div className="limit-field">
+                                  <label>Daily Limit ($)</label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={lf.dailyLimit}
+                                    onChange={(e) =>
+                                      updateLimitFormField(student._id, 'dailyLimit', e.target.value)
+                                    }
+                                  />
+                                </div>
+                                <div className="limit-field">
+                                  <label>Monthly Limit ($)</label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={lf.monthlyLimit}
+                                    onChange={(e) =>
+                                      updateLimitFormField(student._id, 'monthlyLimit', e.target.value)
+                                    }
+                                  />
+                                </div>
+                                <div className="limit-field">
+                                  <label>Approval Above ($)</label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={lf.approvalAbove}
+                                    onChange={(e) =>
+                                      updateLimitFormField(student._id, 'approvalAbove', e.target.value)
+                                    }
+                                  />
+                                </div>
+                              </div>
+                              <button
+                                type="submit"
+                                className="btn btn-sm btn-primary"
+                                disabled={lf.saving}
+                              >
+                                {lf.saving ? 'Saving…' : 'Save Limits'}
+                              </button>
+                            </form>
+                          )}
                         </div>
-                        <div className="student-item-actions">
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-outline"
-                            onClick={() =>
-                              setTransferData({
-                                ...transferData,
-                                toAccountId: student.account?.id || '',
-                              })
-                            }
-                          >
-                            Transfer
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-danger-outline"
-                            onClick={() =>
-                              handleUnlinkStudent(student._id || student.id, student.name)
-                            }
-                          >
-                            Unlink
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="empty-state">
@@ -623,6 +773,7 @@ function App() {
                     </p>
                   </div>
                 )}
+
               </div>
 
               {/* Pending Invites List */}
@@ -682,6 +833,76 @@ function App() {
                   </div>
                 )}
               </div>
+
+              {/* Spending Limits Card */}
+              {limit && (
+                <div className="section-card spending-limits-card">
+                  <h3>Spending Limits</h3>
+                  <p className="section-desc">
+                    Set by your parent. Transfers that exceed these limits will be blocked.
+                  </p>
+
+                  {/* Daily limit */}
+                  <div className="limit-stat-block">
+                    <div className="limit-stat-header">
+                      <span className="limit-stat-label">Daily</span>
+                      <span className="limit-stat-values">
+                        ${(spentStats?.dailySpent ?? 0).toFixed(2)}{' '}
+                        <span className="limit-stat-sep">of</span>{' '}
+                        ${limit.dailyLimit.toFixed(2)} used
+                      </span>
+                    </div>
+                    <div className="limit-progress-bar">
+                      <div
+                        className={`limit-progress-fill ${
+                          (spentStats?.dailySpent ?? 0) >= limit.dailyLimit ? 'limit-exceeded' : ''
+                        }`}
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            (((spentStats?.dailySpent ?? 0) / limit.dailyLimit) * 100)
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                    <span className="limit-remaining">
+                      ${Math.max(0, limit.dailyLimit - (spentStats?.dailySpent ?? 0)).toFixed(2)} remaining today
+                    </span>
+                  </div>
+
+                  {/* Monthly limit */}
+                  <div className="limit-stat-block">
+                    <div className="limit-stat-header">
+                      <span className="limit-stat-label">Monthly</span>
+                      <span className="limit-stat-values">
+                        ${(spentStats?.monthlySpent ?? 0).toFixed(2)}{' '}
+                        <span className="limit-stat-sep">of</span>{' '}
+                        ${limit.monthlyLimit.toFixed(2)} used
+                      </span>
+                    </div>
+                    <div className="limit-progress-bar">
+                      <div
+                        className={`limit-progress-fill ${
+                          (spentStats?.monthlySpent ?? 0) >= limit.monthlyLimit ? 'limit-exceeded' : ''
+                        }`}
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            (((spentStats?.monthlySpent ?? 0) / limit.monthlyLimit) * 100)
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                    <span className="limit-remaining">
+                      ${Math.max(0, limit.monthlyLimit - (spentStats?.monthlySpent ?? 0)).toFixed(2)} remaining this month
+                    </span>
+                  </div>
+
+                  <div className="approval-note">
+                    Transfers above <strong>${limit.approvalAbove}</strong> require approval.
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
