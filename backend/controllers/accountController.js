@@ -2,6 +2,8 @@ import mongoose from 'mongoose';
 import Account from '../models/Account.js';
 import Transaction from '../models/Transaction.js';
 import Limit from '../models/Limit.js';
+import User from '../models/User.js';
+import Notification from '../models/Notification.js';
 
 // @desc    Get currently logged in user's account & balance
 // @route   GET /api/accounts/my-account
@@ -200,6 +202,41 @@ export const transferMoney = async (req, res) => {
           });
         }
       }
+      // 3. Check approvalAbove — if amount exceeds threshold, save as pending (no money moved)
+      if (
+        studentLimit.approvalAbove !== undefined &&
+        studentLimit.approvalAbove !== null &&
+        transferAmount > studentLimit.approvalAbove
+      ) {
+        const pendingTx = await Transaction.create({
+          from: fromAccount._id,
+          to: toAccount._id,
+          amount: transferAmount,
+          status: 'pending',
+          approvedBy: null,
+          rejectedBy: null,
+        });
+
+        // Notify parent if student is linked
+        const studentUser = await User.findById(req.user._id);
+        const parentId = studentUser?.parentId || studentLimit?.parentId;
+        if (parentId) {
+          const recipientUser = toAccount.userId ? await User.findById(toAccount.userId) : null;
+          const recipientName = recipientUser ? recipientUser.name : 'another account';
+          await Notification.create({
+            userId: parentId,
+            message: `${studentUser.name} requested a transfer of $${transferAmount.toFixed(2)} to ${recipientName} that needs your approval.`,
+            type: 'transfer_request',
+            transactionId: pendingTx._id,
+          });
+        }
+
+        return res.status(202).json({
+          message: `Transfer of $${transferAmount.toFixed(2)} requires parent approval (threshold: $${studentLimit.approvalAbove.toFixed(2)}). No money has been moved.`,
+          status: 'pending',
+          transaction: pendingTx,
+        });
+      }
     }
   }
 
@@ -386,6 +423,7 @@ export const getMyTransactions = async (req, res) => {
         populate: { path: 'userId', select: 'name email role' },
       })
       .populate('approvedBy', 'name email role')
+      .populate('rejectedBy', 'name email role')
       .sort({ createdAt: -1 });
 
     res.status(200).json({

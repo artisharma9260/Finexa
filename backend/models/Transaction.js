@@ -20,10 +20,15 @@ const transactionSchema = new mongoose.Schema(
     status: {
       type: String,
       required: [true, 'Transaction status is required'],
-      enum: ['pending', 'completed', 'failed', 'blocked', 'Blocked'],
+      enum: ['pending', 'completed', 'failed', 'blocked', 'Blocked', 'Rejected'],
       default: 'completed',
     },
     approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    rejectedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       default: null,

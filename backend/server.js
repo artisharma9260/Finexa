@@ -6,6 +6,7 @@ import healthRoutes from './routes/healthRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import parentRoutes from './routes/parentRoutes.js';
 import accountRoutes from './routes/accountRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -24,9 +25,16 @@ app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/parent', parentRoutes);
 app.use('/api/accounts', accountRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+let serverInstance = null;
+if (process.env.NODE_ENV !== 'test') {
+  serverInstance = app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+export { serverInstance };
+export default app;

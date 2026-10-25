@@ -1,33 +1,34 @@
 import { useState, useEffect, useCallback } from 'react';
+import Navbar from './components/Navbar';
+import StudentDashboard from './components/StudentDashboard';
+import ParentDashboard from './components/ParentDashboard';
+import TransactionHistory from './components/TransactionHistory';
+import AuthView from './components/AuthView';
 import './App.css';
 
 function App() {
   const [activeTab, setActiveTab] = useState('login'); // 'login' or 'register'
+  const [activeView, setActiveView] = useState('dashboard'); // 'dashboard' or 'transactions'
   const [token, setToken] = useState(localStorage.getItem('finexa_token') || '');
   const [user, setUser] = useState(null);
   const [account, setAccount] = useState(null);
   const [parentAccount, setParentAccount] = useState(null);
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [transferLoading, setTransferLoading] = useState(false);
   const [message, setMessage] = useState({ text: '', type: '' });
 
-  // Transfer state
-  const [transferData, setTransferData] = useState({ toAccountId: '', amount: '' });
-  const [transferLoading, setTransferLoading] = useState(false);
-
-  // Parent screen state
-  const [linkedStudents, setLinkedStudents] = useState([]);
-  const [pendingInvites, setPendingInvites] = useState([]);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteLoading, setInviteLoading] = useState(false);
-  const [loadingStudents, setLoadingStudents] = useState(false);
-
-  // Student spending limits state (fetched from /api/auth/me)
+  // Student specific state
   const [limit, setLimit] = useState(null);
   const [spentStats, setSpentStats] = useState(null);
 
-  // Parent: per-student limit edit forms { [studentId]: { dailyLimit, monthlyLimit, approvalAbove, saving } }
-  const [limitForms, setLimitForms] = useState({});
+  // Parent specific state
+  const [linkedStudents, setLinkedStudents] = useState([]);
+  const [pendingInvites, setPendingInvites] = useState([]);
+  const [approvals, setApprovals] = useState([]);
+
+  // Notifications state
+  const [notifications, setNotifications] = useState([]);
 
   // Auth form states
   const [loginData, setLoginData] = useState({ email: '', password: '' });
@@ -38,10 +39,6 @@ function App() {
     role: 'student',
   });
 
-  // State for testing middleware endpoints
-  const [testResult, setTestResult] = useState(null);
-  const [testingEndpoint, setTestingEndpoint] = useState('');
-
   const handleLogout = useCallback(() => {
     localStorage.removeItem('finexa_token');
     setToken('');
@@ -51,10 +48,11 @@ function App() {
     setTransactions([]);
     setLinkedStudents([]);
     setPendingInvites([]);
+    setApprovals([]);
+    setNotifications([]);
     setLimit(null);
     setSpentStats(null);
-    setLimitForms({});
-    setTestResult(null);
+    setActiveView('dashboard');
     setMessage({ text: 'Logged out successfully', type: 'success' });
   }, []);
 
@@ -116,12 +114,9 @@ function App() {
 
   const fetchLinkedStudents = useCallback(async () => {
     if (!token) return;
-    setLoadingStudents(true);
     try {
       const res = await fetch('/api/parent/students', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
       if (res.ok) {
@@ -130,10 +125,68 @@ function App() {
       }
     } catch (err) {
       console.error('Failed to fetch linked students', err);
-    } finally {
-      setLoadingStudents(false);
     }
   }, [token]);
+
+  const fetchApprovals = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch('/api/parent/approvals', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setApprovals(data.approvals || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch approvals', err);
+    }
+  }, [token]);
+
+  const fetchNotifications = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch('/api/notifications', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setNotifications(data.notifications || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch notifications', err);
+    }
+  }, [token]);
+
+  const handleMarkNotificationRead = async (id) => {
+    try {
+      const res = await fetch(`/api/notifications/${id}/read`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setNotifications((prev) =>
+          prev.map((n) => (n._id === id ? { ...n, read: true } : n))
+        );
+      }
+    } catch (err) {
+      console.error('Failed to mark notification as read', err);
+    }
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    try {
+      const res = await fetch('/api/notifications/mark-all-read', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      }
+    } catch (err) {
+      console.error('Failed to mark all as read', err);
+    }
+  };
 
   // Check token on mount or token change
   useEffect(() => {
@@ -141,18 +194,21 @@ function App() {
       fetchUserProfile(token);
       fetchAccount();
       fetchTransactions();
+      fetchNotifications();
     } else {
       setUser(null);
     }
-  }, [token, fetchUserProfile, fetchAccount, fetchTransactions]);
+  }, [token, fetchUserProfile, fetchAccount, fetchTransactions, fetchNotifications]);
 
-  // If user is a parent, fetch their linked students
+  // If user is a parent, fetch their linked students and approval queue
   useEffect(() => {
     if (user && user.role === 'parent') {
       fetchLinkedStudents();
+      fetchApprovals();
     }
-  }, [user, fetchLinkedStudents]);
+  }, [user, fetchLinkedStudents, fetchApprovals]);
 
+  // Auth: Login
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -174,7 +230,7 @@ function App() {
       localStorage.setItem('finexa_token', data.token);
       setToken(data.token);
       setUser(data.user);
-      setMessage({ text: 'Login successful!', type: 'success' });
+      setMessage({ text: `Welcome back, ${data.user.name}!`, type: 'success' });
       setLoginData({ email: '', password: '' });
     } catch (err) {
       setMessage({ text: err.message, type: 'error' });
@@ -183,6 +239,7 @@ function App() {
     }
   };
 
+  // Auth: Register
   const handleRegister = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -204,7 +261,7 @@ function App() {
       localStorage.setItem('finexa_token', data.token);
       setToken(data.token);
       setUser(data.user);
-      setMessage({ text: 'Account created successfully!', type: 'success' });
+      setMessage({ text: `Welcome to Finexa, ${data.user.name}!`, type: 'success' });
       setRegisterData({ name: '', email: '', password: '', role: 'student' });
     } catch (err) {
       setMessage({ text: err.message, type: 'error' });
@@ -213,11 +270,8 @@ function App() {
     }
   };
 
-  // Money Transfer Action (Protected by MongoDB Transaction)
-  const handleTransfer = async (e) => {
-    e.preventDefault();
-    if (!transferData.toAccountId || !transferData.amount) return;
-
+  // Action: Transfer Money
+  const handleTransfer = async (toAccountId, amount) => {
     setTransferLoading(true);
     setMessage({ text: '', type: '' });
 
@@ -228,39 +282,48 @@ function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({
-          toAccountId: transferData.toAccountId.trim(),
-          amount: Number(transferData.amount),
-        }),
+        body: JSON.stringify({ toAccountId, amount }),
       });
 
       const data = await res.json();
+
+      if (res.status === 202) {
+        // Pending approval
+        setMessage({
+          text: data.message,
+          type: 'info',
+        });
+        fetchTransactions();
+        fetchNotifications();
+        return true;
+      }
 
       if (!res.ok) {
         throw new Error(data.message || 'Transfer failed');
       }
 
       setMessage({
-        text: `Transfer of $${Number(transferData.amount).toFixed(2)} completed successfully!`,
+        text: `Transfer of $${amount.toFixed(2)} completed successfully!`,
         type: 'success',
       });
 
-      // Clear input and reload account balances & history
-      setTransferData({ toAccountId: '', amount: '' });
       fetchAccount();
       fetchTransactions();
-      fetchUserProfile(token); // refresh spentStats for student limits
+      fetchUserProfile(token);
+      fetchNotifications();
       if (user?.role === 'parent') {
         fetchLinkedStudents();
       }
+      return true;
     } catch (err) {
       setMessage({ text: err.message, type: 'error' });
+      return false;
     } finally {
       setTransferLoading(false);
     }
   };
 
-  // Add mock funds for testing
+  // Action: Deposit Mock Funds
   const handleDeposit = async (amount) => {
     try {
       const res = await fetch('/api/accounts/deposit', {
@@ -273,7 +336,7 @@ function App() {
       });
       const data = await res.json();
       if (res.ok) {
-        setMessage({ text: `Added $${amount} to your balance!`, type: 'success' });
+        setMessage({ text: `Added $${amount.toFixed(2)} to your balance!`, type: 'success' });
         fetchAccount();
       }
     } catch (err) {
@@ -281,118 +344,46 @@ function App() {
     }
   };
 
-  // Parent Action: Send invite / Link student
-  const handleInviteStudent = async (e) => {
-    e.preventDefault();
-    if (!inviteEmail) return;
-
-    setInviteLoading(true);
-    setMessage({ text: '', type: '' });
-
+  // Action: Parent Approves Transfer
+  const handleApprove = async (txId) => {
     try {
-      const res = await fetch('/api/parent/invite', {
+      const res = await fetch(`/api/parent/approvals/${txId}/approve`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ email: inviteEmail }),
+        headers: { Authorization: `Bearer ${token}` },
       });
-
       const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.message || 'Failed to send invitation');
-      }
-
+      if (!res.ok) throw new Error(data.message || 'Approval failed');
       setMessage({ text: data.message, type: 'success' });
-      setInviteEmail('');
+      fetchApprovals();
       fetchLinkedStudents();
+      fetchAccount();
+      fetchTransactions();
+      fetchNotifications();
     } catch (err) {
       setMessage({ text: err.message, type: 'error' });
-    } finally {
-      setInviteLoading(false);
     }
   };
 
-  // Parent Action: Unlink student
-  const handleUnlinkStudent = async (studentId, studentName) => {
-    if (!window.confirm(`Are you sure you want to unlink ${studentName}?`)) {
-      return;
-    }
-
+  // Action: Parent Rejects Transfer
+  const handleReject = async (txId) => {
     try {
-      const res = await fetch(`/api/parent/unlink/${studentId}`, {
+      const res = await fetch(`/api/parent/approvals/${txId}/reject`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       });
-
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || 'Failed to unlink student');
-      }
-
+      if (!res.ok) throw new Error(data.message || 'Rejection failed');
       setMessage({ text: data.message, type: 'success' });
-      fetchLinkedStudents();
+      fetchApprovals();
+      fetchTransactions();
+      fetchNotifications();
     } catch (err) {
       setMessage({ text: err.message, type: 'error' });
     }
   };
 
-  // Parent Action: Cancel invite
-  const handleCancelInvite = async (inviteId) => {
-    try {
-      const res = await fetch(`/api/parent/invite/${inviteId}`, {
-        method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || 'Failed to cancel invitation');
-      }
-
-      setMessage({ text: data.message, type: 'success' });
-      fetchLinkedStudents();
-    } catch (err) {
-      setMessage({ text: err.message, type: 'error' });
-    }
-  };
-
-  // Parent Action: open inline limit editor for a student
-  const initLimitForm = (student) => {
-    setLimitForms((prev) => ({
-      ...prev,
-      [student._id]: {
-        dailyLimit: student.limit?.dailyLimit ?? 100,
-        monthlyLimit: student.limit?.monthlyLimit ?? 500,
-        approvalAbove: student.limit?.approvalAbove ?? 50,
-        saving: false,
-        open: !(prev[student._id]?.open),
-      },
-    }));
-  };
-
-  const updateLimitFormField = (studentId, field, value) => {
-    setLimitForms((prev) => ({
-      ...prev,
-      [studentId]: { ...prev[studentId], [field]: value },
-    }));
-  };
-
-  // Parent Action: save limits for a student
-  const handleSetLimits = async (e, studentId) => {
-    e.preventDefault();
-    const form = limitForms[studentId];
-    if (!form) return;
-    setLimitForms((prev) => ({
-      ...prev,
-      [studentId]: { ...prev[studentId], saving: true },
-    }));
+  // Action: Parent Sets Limits
+  const handleSetLimits = async (studentId, limits) => {
     try {
       const res = await fetch(`/api/parent/limits/${studentId}`, {
         method: 'POST',
@@ -400,759 +391,188 @@ function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({
-          dailyLimit: Number(form.dailyLimit),
-          monthlyLimit: Number(form.monthlyLimit),
-          approvalAbove: Number(form.approvalAbove),
-        }),
+        body: JSON.stringify(limits),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Failed to save limits');
-      setMessage({ text: `Limits saved for student.`, type: 'success' });
-      // Close form and refresh student list so new limit values appear
-      setLimitForms((prev) => ({
-        ...prev,
-        [studentId]: { ...prev[studentId], saving: false, open: false },
-      }));
+      if (!res.ok) throw new Error(data.message || 'Failed to set limits');
+      setMessage({ text: data.message || 'Limits updated successfully', type: 'success' });
       fetchLinkedStudents();
     } catch (err) {
       setMessage({ text: err.message, type: 'error' });
-      setLimitForms((prev) => ({
-        ...prev,
-        [studentId]: { ...prev[studentId], saving: false },
-      }));
     }
   };
 
-  // Test endpoints helper
-  const testRoute = async (endpoint, label) => {
-    setTestingEndpoint(label);
-    setTestResult(null);
+  // Action: Parent Invites Student
+  const handleInviteStudent = async (email) => {
     try {
-      const res = await fetch(endpoint, {
+      const res = await fetch('/api/parent/invite', {
+        method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
+        body: JSON.stringify({ email }),
       });
       const data = await res.json();
-      setTestResult({
-        status: res.status,
-        statusText: res.statusText,
-        ok: res.ok,
-        data,
-      });
+      if (!res.ok) throw new Error(data.message || 'Failed to send invite');
+      setMessage({ text: data.message, type: 'success' });
+      fetchLinkedStudents();
+      return true;
     } catch (err) {
-      setTestResult({
-        status: 500,
-        statusText: 'Network Error',
-        ok: false,
-        data: { message: err.message },
-      });
+      setMessage({ text: err.message, type: 'error' });
+      return false;
     }
   };
 
+  // Action: Parent Unlinks Student
+  const handleUnlinkStudent = async (studentId, studentName) => {
+    if (!window.confirm(`Are you sure you want to unlink ${studentName}?`)) return;
+    try {
+      const res = await fetch(`/api/parent/unlink/${studentId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to unlink student');
+      setMessage({ text: data.message, type: 'success' });
+      fetchLinkedStudents();
+    } catch (err) {
+      setMessage({ text: err.message, type: 'error' });
+    }
+  };
+
+  // Action: Parent Cancels Invite
+  const handleCancelInvite = async (inviteId) => {
+    try {
+      const res = await fetch(`/api/parent/invite/${inviteId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to cancel invitation');
+      setMessage({ text: data.message, type: 'success' });
+      fetchLinkedStudents();
+    } catch (err) {
+      setMessage({ text: err.message, type: 'error' });
+    }
+  };
+
+  // Student's pending count (requests waiting for parent approval)
+  const studentPendingCount = transactions.filter((tx) => {
+    const isSender = (tx.from?._id || tx.from) === (account?._id || account?.id);
+    return isSender && tx.status === 'pending';
+  }).length;
+
   return (
-    <div className="finexa-container">
-      <header className="finexa-header">
-        <div className="logo-badge">Finexa</div>
-        <p className="subtitle">Family & Student Financial Platform</p>
-      </header>
-
-      {message.text && (
-        <div className={`alert-banner ${message.type}`}>
-          {message.text}
-          <button
-            type="button"
-            className="alert-close"
-            onClick={() => setMessage({ text: '', type: '' })}
-          >
-            ×
-          </button>
-        </div>
-      )}
-
+    <div className="finexa-app">
       {token && user ? (
-        // Logged-in Dashboard
-        <main className="dashboard-card">
-          <div className="card-header">
-            <div>
-              <h2>Hello, {user.name}</h2>
-              <p className="user-email-sub">{user.email}</p>
-            </div>
-            <span className={`role-badge ${user.role}`}>{user.role.toUpperCase()}</span>
-          </div>
+        <>
+          <Navbar
+            user={user}
+            activeView={activeView}
+            setActiveView={setActiveView}
+            onLogout={handleLogout}
+            approvalsCount={approvals.length}
+            pendingCount={studentPendingCount}
+            unreadNotifsCount={notifications.filter((n) => !n.read).length}
+          />
 
-          {/* ACCOUNT & BALANCE CARD */}
-          <div className="account-balance-card">
-            <div className="balance-info">
-              <span className="balance-label">Available Balance</span>
-              <div className="balance-amount">
-                ${account ? account.balance.toFixed(2) : '0.00'}
-              </div>
-              <div className="account-id-row">
-                <span className="id-label">Account ID:</span>
-                <code className="account-id-code" title={account?._id}>
-                  {account ? account._id : 'Loading...'}
-                </code>
-              </div>
-            </div>
-            <div className="balance-actions">
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => handleDeposit(100)}
-                title="Deposit $100 for testing transfers"
-              >
-                + Add $100
-              </button>
-            </div>
-          </div>
-
-          {/* MONEY TRANSFER CARD */}
-          <div className="section-card transfer-card">
-            <div className="section-header-row">
-              <h3>Transfer Money</h3>
-              <span className="tx-secure-tag">MongoDB Transaction Safe</span>
-            </div>
-            <p className="section-desc">
-              Send money directly to any account ID. Both balances update atomically.
-            </p>
-
-            {/* Quick target chips */}
-            {user.role === 'parent' && linkedStudents.length > 0 && (
-              <div className="quick-transfer-chips">
-                <span className="chip-label">Quick select student:</span>
-                {linkedStudents.map((st) => (
-                  <button
-                    key={st._id}
-                    type="button"
-                    className="chip-btn"
-                    onClick={() =>
-                      setTransferData({
-                        ...transferData,
-                        toAccountId: st.account?.id || '',
-                      })
-                    }
-                  >
-                    {st.name} (${st.account?.balance?.toFixed(2) || '0.00'})
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {user.role === 'student' && parentAccount && (
-              <div className="quick-transfer-chips">
-                <span className="chip-label">Quick select parent:</span>
+          <div className="main-wrapper">
+            {message.text && (
+              <div className={`alert-banner ${message.type}`}>
+                <span>{message.text}</span>
                 <button
                   type="button"
-                  className="chip-btn"
-                  onClick={() =>
-                    setTransferData({
-                      ...transferData,
-                      toAccountId: parentAccount.id,
-                    })
-                  }
+                  className="alert-close"
+                  onClick={() => setMessage({ text: '', type: '' })}
                 >
-                  {user.parentId?.name} (${parentAccount.balance?.toFixed(2) || '0.00'})
+                  ×
                 </button>
               </div>
             )}
 
-            <form onSubmit={handleTransfer} className="transfer-form">
-              <div className="form-group">
-                <label htmlFor="to-acc-id">Recipient Account ID</label>
-                <input
-                  id="to-acc-id"
-                  type="text"
-                  placeholder="e.g. 6ac77ea0ef645ab8b633cce8"
-                  value={transferData.toAccountId}
-                  onChange={(e) =>
-                    setTransferData({
-                      ...transferData,
-                      toAccountId: e.target.value,
-                    })
-                  }
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="transfer-amt">Amount ($)</label>
-                <input
-                  id="transfer-amt"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  placeholder="50.00"
-                  value={transferData.amount}
-                  onChange={(e) =>
-                    setTransferData({
-                      ...transferData,
-                      amount: e.target.value,
-                    })
-                  }
-                  required
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={transferLoading}
-              >
-                {transferLoading ? 'Processing Transfer...' : 'Send Money'}
-              </button>
-            </form>
-          </div>
-
-          {/* PARENT SPECIFIC VIEW: INVITE & LINKED STUDENTS */}
-          {user.role === 'parent' ? (
-            <div className="parent-screen-section">
-              <div className="section-card invite-card">
-                <h3>Invite & Link Student</h3>
-                <p className="section-desc">
-                  Invite your student by email. Existing student accounts link
-                  immediately; new ones will link automatically upon sign up.
-                </p>
-
-                <form onSubmit={handleInviteStudent} className="invite-form">
-                  <div className="invite-input-row">
-                    <input
-                      type="email"
-                      placeholder="student@example.com"
-                      value={inviteEmail}
-                      onChange={(e) => setInviteEmail(e.target.value)}
-                      required
-                    />
-                    <button
-                      type="submit"
-                      className="btn btn-primary btn-invite"
-                      disabled={inviteLoading}
-                    >
-                      {inviteLoading ? 'Sending...' : 'Send Invite'}
-                    </button>
-                  </div>
-                </form>
-              </div>
-
-              {/* Linked Students List */}
-              <div className="section-card">
-                <div className="section-header-row">
-                  <h3>Your Linked Students</h3>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-outline"
-                    onClick={fetchLinkedStudents}
-                    disabled={loadingStudents}
-                  >
-                    Refresh
-                  </button>
-                </div>
-
-                {loadingStudents ? (
-                  <p className="muted-text">Loading students...</p>
-                ) : linkedStudents.length > 0 ? (
-                  <div className="student-list">
-                    {linkedStudents.map((student) => {
-                      const lf = limitForms[student._id];
-                      const lim = student.limit;
-                      return (
-                        <div key={student._id || student.id} className="student-item">
-                          <div className="student-info">
-                            <span className="student-name">{student.name}</span>
-                            <span className="student-email">{student.email}</span>
-                            <span className="student-account-tag">
-                              Acc: {student.account?.id} • Balance: $
-                              {student.account?.balance?.toFixed(2) || '0.00'}
-                            </span>
-                            {/* Limits summary row */}
-                            <div className="student-limits-row">
-                              <span className="limit-chip">
-                                Daily: <strong>${lim?.dailyLimit ?? 100}</strong>
-                              </span>
-                              <span className="limit-chip">
-                                Monthly: <strong>${lim?.monthlyLimit ?? 500}</strong>
-                              </span>
-                              <span className="limit-chip">
-                                Approval above: <strong>${lim?.approvalAbove ?? 50}</strong>
-                              </span>
-                            </div>
-                          </div>
-                          <div className="student-item-actions">
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-outline"
-                              onClick={() =>
-                                setTransferData({
-                                  ...transferData,
-                                  toAccountId: student.account?.id || '',
-                                })
-                              }
-                            >
-                              Transfer
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-accent"
-                              onClick={() => initLimitForm(student)}
-                            >
-                              {lf?.open ? 'Close Limits' : 'Set Limits'}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-danger-outline"
-                              onClick={() =>
-                                handleUnlinkStudent(student._id || student.id, student.name)
-                              }
-                            >
-                              Unlink
-                            </button>
-                          </div>
-                          {/* Inline limit editor */}
-                          {lf?.open && (
-                            <form
-                              className="limit-edit-form"
-                              onSubmit={(e) => handleSetLimits(e, student._id)}
-                            >
-                              <div className="limit-fields-row">
-                                <div className="limit-field">
-                                  <label>Daily Limit ($)</label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="1"
-                                    value={lf.dailyLimit}
-                                    onChange={(e) =>
-                                      updateLimitFormField(student._id, 'dailyLimit', e.target.value)
-                                    }
-                                  />
-                                </div>
-                                <div className="limit-field">
-                                  <label>Monthly Limit ($)</label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="1"
-                                    value={lf.monthlyLimit}
-                                    onChange={(e) =>
-                                      updateLimitFormField(student._id, 'monthlyLimit', e.target.value)
-                                    }
-                                  />
-                                </div>
-                                <div className="limit-field">
-                                  <label>Approval Above ($)</label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="1"
-                                    value={lf.approvalAbove}
-                                    onChange={(e) =>
-                                      updateLimitFormField(student._id, 'approvalAbove', e.target.value)
-                                    }
-                                  />
-                                </div>
-                              </div>
-                              <button
-                                type="submit"
-                                className="btn btn-sm btn-primary"
-                                disabled={lf.saving}
-                              >
-                                {lf.saving ? 'Saving…' : 'Save Limits'}
-                              </button>
-                            </form>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="empty-state">
-                    <p>No students linked to your account yet.</p>
-                    <p className="empty-sub">
-                      Use the form above to invite and connect your student.
-                    </p>
-                  </div>
-                )}
-
-              </div>
-
-              {/* Pending Invites List */}
-              {pendingInvites.length > 0 && (
-                <div className="section-card">
-                  <h3>Pending Invitations</h3>
-                  <p className="section-desc">
-                    These students haven&apos;t registered yet. Accounts will link when
-                    they sign up.
-                  </p>
-                  <div className="student-list">
-                    {pendingInvites.map((invite) => (
-                      <div key={invite._id} className="student-item pending-item">
-                        <div className="student-info">
-                          <span className="student-email">{invite.studentEmail}</span>
-                          <span className="pending-badge">Pending Registration</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-danger-outline"
-                          onClick={() => handleCancelInvite(invite._id)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : (
-            // STUDENT SPECIFIC VIEW
-            <div className="student-screen-section">
-              <div className="section-card">
-                <h3>Parent Connection</h3>
-                {user.parentId ? (
-                  <div className="linked-parent-box">
-                    <span className="badge-connected">Connected</span>
-                    <p>
-                      <strong>Linked Parent:</strong> {user.parentId.name} (
-                      {user.parentId.email})
-                    </p>
-                    {parentAccount && (
-                      <p className="parent-acc-detail">
-                        Parent Account ID: <code>{parentAccount.id}</code>
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <div className="empty-state">
-                    <p>Not linked to a parent account yet.</p>
-                    <p className="empty-sub">
-                      Your parent can link you by sending an invite to your email:
-                      <br />
-                      <strong>{user.email}</strong>
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Spending Limits Card */}
-              {limit && (
-                <div className="section-card spending-limits-card">
-                  <h3>Spending Limits</h3>
-                  <p className="section-desc">
-                    Set by your parent. Transfers that exceed these limits will be blocked.
-                  </p>
-
-                  {/* Daily limit */}
-                  <div className="limit-stat-block">
-                    <div className="limit-stat-header">
-                      <span className="limit-stat-label">Daily</span>
-                      <span className="limit-stat-values">
-                        ${(spentStats?.dailySpent ?? 0).toFixed(2)}{' '}
-                        <span className="limit-stat-sep">of</span>{' '}
-                        ${limit.dailyLimit.toFixed(2)} used
-                      </span>
-                    </div>
-                    <div className="limit-progress-bar">
-                      <div
-                        className={`limit-progress-fill ${
-                          (spentStats?.dailySpent ?? 0) >= limit.dailyLimit ? 'limit-exceeded' : ''
-                        }`}
-                        style={{
-                          width: `${Math.min(
-                            100,
-                            (((spentStats?.dailySpent ?? 0) / limit.dailyLimit) * 100)
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="limit-remaining">
-                      ${Math.max(0, limit.dailyLimit - (spentStats?.dailySpent ?? 0)).toFixed(2)} remaining today
-                    </span>
-                  </div>
-
-                  {/* Monthly limit */}
-                  <div className="limit-stat-block">
-                    <div className="limit-stat-header">
-                      <span className="limit-stat-label">Monthly</span>
-                      <span className="limit-stat-values">
-                        ${(spentStats?.monthlySpent ?? 0).toFixed(2)}{' '}
-                        <span className="limit-stat-sep">of</span>{' '}
-                        ${limit.monthlyLimit.toFixed(2)} used
-                      </span>
-                    </div>
-                    <div className="limit-progress-bar">
-                      <div
-                        className={`limit-progress-fill ${
-                          (spentStats?.monthlySpent ?? 0) >= limit.monthlyLimit ? 'limit-exceeded' : ''
-                        }`}
-                        style={{
-                          width: `${Math.min(
-                            100,
-                            (((spentStats?.monthlySpent ?? 0) / limit.monthlyLimit) * 100)
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="limit-remaining">
-                      ${Math.max(0, limit.monthlyLimit - (spentStats?.monthlySpent ?? 0)).toFixed(2)} remaining this month
-                    </span>
-                  </div>
-
-                  <div className="approval-note">
-                    Transfers above <strong>${limit.approvalAbove}</strong> require approval.
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* RECENT TRANSACTIONS HISTORY */}
-          <div className="section-card">
-            <div className="section-header-row">
-              <h3>Recent Transfers</h3>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={fetchTransactions}
-              >
-                Refresh
-              </button>
-            </div>
-
-            {transactions.length > 0 ? (
-              <div className="transaction-list">
-                {transactions.map((tx) => {
-                  const isSender =
-                    (tx.from?._id || tx.from) === (account?._id || account?.id);
-                  return (
-                    <div key={tx._id} className="tx-item">
-                      <div className="tx-main">
-                        <span
-                          className={`tx-type-badge ${isSender ? 'sent' : 'received'}`}
-                        >
-                          {isSender ? 'SENT' : 'RECEIVED'}
-                        </span>
-                        <div className="tx-details">
-                          <span className="tx-counterparty">
-                            {isSender
-                              ? `To: ${tx.to?.userId?.name || 'Account ' + (tx.to?._id || tx.to)}`
-                              : `From: ${tx.from?.userId?.name || 'Account ' + (tx.from?._id || tx.from)}`}
-                          </span>
-                          <span className="tx-time">
-                            {new Date(tx.createdAt).toLocaleString()}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="tx-amount-col">
-                        <span className={`tx-amount ${isSender ? 'minus' : 'plus'}`}>
-                          {isSender ? '-' : '+'}${tx.amount.toFixed(2)}
-                        </span>
-                        <span className="tx-status-badge">{tx.status}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+            {activeView === 'transactions' ? (
+              <TransactionHistory
+                transactions={transactions}
+                currentAccountId={account?._id || account?.id}
+                onRefresh={fetchTransactions}
+                onBackToDashboard={() => setActiveView('dashboard')}
+              />
+            ) : user.role === 'parent' ? (
+              <ParentDashboard
+                user={user}
+                account={account}
+                linkedStudents={linkedStudents}
+                approvals={approvals}
+                pendingInvites={pendingInvites}
+                notifications={notifications}
+                onMarkAsRead={handleMarkNotificationRead}
+                onMarkAllAsRead={handleMarkAllNotificationsRead}
+                onRefreshNotifications={fetchNotifications}
+                onApprove={handleApprove}
+                onReject={handleReject}
+                onSetLimits={handleSetLimits}
+                onInvite={handleInviteStudent}
+                onUnlink={handleUnlinkStudent}
+                onCancelInvite={handleCancelInvite}
+                onTransfer={handleTransfer}
+                onDeposit={handleDeposit}
+                onRefreshApprovals={fetchApprovals}
+                onRefreshStudents={fetchLinkedStudents}
+                transferLoading={transferLoading}
+              />
             ) : (
-              <div className="empty-state">
-                <p>No transfers yet.</p>
-                <p className="empty-sub">
-                  Transfers sent or received will appear here with full transaction
-                  records.
-                </p>
-              </div>
+              <StudentDashboard
+                user={user}
+                account={account}
+                parentAccount={parentAccount}
+                limit={limit}
+                spentStats={spentStats}
+                transactions={transactions}
+                notifications={notifications}
+                onMarkAsRead={handleMarkNotificationRead}
+                onMarkAllAsRead={handleMarkAllNotificationsRead}
+                onRefreshNotifications={fetchNotifications}
+                onTransfer={handleTransfer}
+                onDeposit={handleDeposit}
+                onViewAllTransactions={() => setActiveView('transactions')}
+                transferLoading={transferLoading}
+              />
             )}
           </div>
+        </>
+      ) : (
+        <div className="auth-container">
+          <div className="auth-brand">
+            <span className="auth-logo">Finexa</span>
+            <p className="auth-subtitle">Family & Student Financial Platform</p>
+          </div>
 
-          {/* Middleware Tester */}
-          <div className="middleware-tester">
-            <h3>Test Middleware & Endpoints</h3>
-            <div className="button-group">
+          {message.text && (
+            <div className={`alert-banner ${message.type}`}>
+              <span>{message.text}</span>
               <button
                 type="button"
-                className="btn btn-outline"
-                onClick={() =>
-                  testRoute('/api/accounts/my-account', 'Account Check (/my-account)')
-                }
+                className="alert-close"
+                onClick={() => setMessage({ text: '', type: '' })}
               >
-                Test /my-account
-              </button>
-              <button
-                type="button"
-                className="btn btn-outline"
-                onClick={() =>
-                  testRoute('/api/parent/students', 'Parent Students Route')
-                }
-              >
-                Test /parent/students
-              </button>
-              <button
-                type="button"
-                className="btn btn-outline"
-                onClick={() => testRoute('/api/auth/student-only', 'Student Only Route')}
-              >
-                Test /auth/student-only
+                ×
               </button>
             </div>
-
-            {testResult && (
-              <div className={`result-box ${testResult.ok ? 'success' : 'forbidden'}`}>
-                <div className="result-header">
-                  <strong>{testingEndpoint}</strong>
-                  <span className="status-badge">
-                    HTTP {testResult.status} ({testResult.statusText})
-                  </span>
-                </div>
-                <pre>{JSON.stringify(testResult.data, null, 2)}</pre>
-              </div>
-            )}
-          </div>
-
-          <div className="actions">
-            <button type="button" className="btn btn-danger" onClick={handleLogout}>
-              Log Out
-            </button>
-          </div>
-        </main>
-      ) : (
-        // Auth Forms (Login / Register)
-        <main className="auth-box">
-          <div className="tabs">
-            <button
-              type="button"
-              className={`tab-btn ${activeTab === 'login' ? 'active' : ''}`}
-              onClick={() => {
-                setActiveTab('login');
-                setMessage({ text: '', type: '' });
-              }}
-            >
-              Sign In
-            </button>
-            <button
-              type="button"
-              className={`tab-btn ${activeTab === 'register' ? 'active' : ''}`}
-              onClick={() => {
-                setActiveTab('register');
-                setMessage({ text: '', type: '' });
-              }}
-            >
-              Register
-            </button>
-          </div>
-
-          {activeTab === 'login' ? (
-            <form onSubmit={handleLogin} className="form-card">
-              <h2>Welcome to Finexa</h2>
-              <p className="form-subtitle">Enter your credentials to access your account</p>
-
-              <div className="form-group">
-                <label htmlFor="login-email">Email Address</label>
-                <input
-                  id="login-email"
-                  type="email"
-                  placeholder="name@example.com"
-                  required
-                  value={loginData.email}
-                  onChange={(e) =>
-                    setLoginData({ ...loginData, email: e.target.value })
-                  }
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="login-password">Password</label>
-                <input
-                  id="login-password"
-                  type="password"
-                  placeholder="••••••••"
-                  required
-                  value={loginData.password}
-                  onChange={(e) =>
-                    setLoginData({ ...loginData, password: e.target.value })
-                  }
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={loading}
-              >
-                {loading ? 'Signing In...' : 'Sign In'}
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={handleRegister} className="form-card">
-              <h2>Create an Account</h2>
-              <p className="form-subtitle">Register as a Parent or Student</p>
-
-              <div className="form-group">
-                <label htmlFor="reg-name">Full Name</label>
-                <input
-                  id="reg-name"
-                  type="text"
-                  placeholder="Jane Doe"
-                  required
-                  value={registerData.name}
-                  onChange={(e) =>
-                    setRegisterData({ ...registerData, name: e.target.value })
-                  }
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="reg-email">Email Address</label>
-                <input
-                  id="reg-email"
-                  type="email"
-                  placeholder="name@example.com"
-                  required
-                  value={registerData.email}
-                  onChange={(e) =>
-                    setRegisterData({ ...registerData, email: e.target.value })
-                  }
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="reg-password">Password</label>
-                <input
-                  id="reg-password"
-                  type="password"
-                  placeholder="Minimum 6 characters"
-                  required
-                  minLength={6}
-                  value={registerData.password}
-                  onChange={(e) =>
-                    setRegisterData({ ...registerData, password: e.target.value })
-                  }
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="reg-role">I am a:</label>
-                <select
-                  id="reg-role"
-                  value={registerData.role}
-                  onChange={(e) =>
-                    setRegisterData({ ...registerData, role: e.target.value })
-                  }
-                >
-                  <option value="student">Student</option>
-                  <option value="parent">Parent</option>
-                </select>
-              </div>
-
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={loading}
-              >
-                {loading ? 'Creating Account...' : 'Register'}
-              </button>
-            </form>
           )}
-        </main>
+
+          <AuthView
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            loginData={loginData}
+            setLoginData={setLoginData}
+            registerData={registerData}
+            setRegisterData={setRegisterData}
+            onLogin={handleLogin}
+            onRegister={handleRegister}
+            loading={loading}
+          />
+        </div>
       )}
     </div>
   );

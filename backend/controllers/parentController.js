@@ -1,7 +1,10 @@
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Invitation from '../models/Invitation.js';
 import Account from '../models/Account.js';
 import Limit from '../models/Limit.js';
+import Transaction from '../models/Transaction.js';
+import Notification from '../models/Notification.js';
 
 // @desc    Invite a student by email and link accounts
 // @route   POST /api/parent/invite
@@ -342,6 +345,257 @@ export const cancelInvite = async (req, res) => {
   } catch (error) {
     res.status(500).json({
       message: 'Server error cancelling invitation',
+      error: error.message,
+    });
+  }
+};
+
+// @desc    List all pending transfer requests from linked students
+// @route   GET /api/parent/approvals
+// @access  Private (Parent only)
+export const getPendingApprovals = async (req, res) => {
+  try {
+    // Get all students linked to this parent
+    const students = await User.find({
+      parentId: req.user._id,
+      role: 'student',
+    }).select('_id');
+
+    if (students.length === 0) {
+      return res.status(200).json({ approvals: [] });
+    }
+
+    // Get accounts for those students
+    const studentIds = students.map((s) => s._id);
+    const accounts = await Account.find({ userId: { $in: studentIds } });
+    const accountIds = accounts.map((a) => a._id);
+
+    // Find pending transactions where sender is one of those student accounts
+    const approvals = await Transaction.find({
+      from: { $in: accountIds },
+      status: 'pending',
+    })
+      .populate({
+        path: 'from',
+        populate: { path: 'userId', select: 'name email role' },
+      })
+      .populate({
+        path: 'to',
+        populate: { path: 'userId', select: 'name email role' },
+      })
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({ approvals });
+  } catch (error) {
+    res.status(500).json({
+      message: 'Failed to retrieve pending approvals',
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Approve a pending student transfer — move money atomically
+// @route   POST /api/parent/approvals/:txId/approve
+// @access  Private (Parent only)
+export const approveTransfer = async (req, res) => {
+  try {
+    const { txId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(txId)) {
+      return res.status(400).json({ message: 'Invalid transaction ID' });
+    }
+
+    // Find the pending transaction
+    const tx = await Transaction.findById(txId)
+      .populate('from')
+      .populate('to');
+
+    if (!tx) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    if (tx.status !== 'pending') {
+      return res.status(400).json({
+        message: `Transaction is already ${tx.status} and cannot be approved`,
+      });
+    }
+
+    // Verify the sender is a student linked to this parent
+    const fromAccount = tx.from;
+    const senderUser = await User.findById(fromAccount.userId);
+    if (
+      !senderUser ||
+      senderUser.role !== 'student' ||
+      !senderUser.parentId ||
+      senderUser.parentId.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({
+        message: 'You are not authorised to approve this transfer',
+      });
+    }
+
+    const transferAmount = tx.amount;
+
+    // Move money atomically (with session fallback for standalone MongoDB)
+    let session = null;
+    try {
+      session = await mongoose.startSession();
+      session.startTransaction();
+
+      const updatedFrom = await Account.findOneAndUpdate(
+        { _id: fromAccount._id, balance: { $gte: transferAmount } },
+        { $inc: { balance: -transferAmount } },
+        { returnDocument: 'after', session }
+      );
+
+      if (!updatedFrom) {
+        await session.abortTransaction();
+        // Mark as failed due to insufficient funds at approval time
+        await Transaction.findByIdAndUpdate(txId, { status: 'failed' });
+        return res.status(400).json({
+          message: `Approval failed: student's balance ($${fromAccount.balance.toFixed(2)}) is insufficient for $${transferAmount.toFixed(2)}`,
+        });
+      }
+
+      await Account.findByIdAndUpdate(
+        tx.to._id,
+        { $inc: { balance: transferAmount } },
+        { session }
+      );
+
+      await Transaction.findByIdAndUpdate(
+        txId,
+        { status: 'completed', approvedBy: req.user._id },
+        { session }
+      );
+
+      await session.commitTransaction();
+    } catch (txError) {
+      if (session) await session.abortTransaction().catch(() => {});
+
+      const isStandalone =
+        txError.message &&
+        (txError.message.includes('Transaction numbers are only allowed') ||
+          txError.message.includes('does not support retryable writes') ||
+          txError.message.includes('replica set'));
+
+      if (isStandalone) {
+        // Atomic fallback for standalone MongoDB
+        const updatedFrom = await Account.findOneAndUpdate(
+          { _id: fromAccount._id, balance: { $gte: transferAmount } },
+          { $inc: { balance: -transferAmount } },
+          { returnDocument: 'after' }
+        );
+
+        if (!updatedFrom) {
+          await Transaction.findByIdAndUpdate(txId, { status: 'failed' });
+          return res.status(400).json({
+            message: `Approval failed: student's balance is insufficient for $${transferAmount.toFixed(2)}`,
+          });
+        }
+
+        await Account.findByIdAndUpdate(tx.to._id, {
+          $inc: { balance: transferAmount },
+        });
+
+        await Transaction.findByIdAndUpdate(txId, {
+          status: 'completed',
+          approvedBy: req.user._id,
+        });
+      } else {
+        throw txError;
+      }
+    } finally {
+      if (session) session.endSession();
+    }
+
+    const updatedTx = await Transaction.findById(txId)
+      .populate({ path: 'from', populate: { path: 'userId', select: 'name email' } })
+      .populate({ path: 'to', populate: { path: 'userId', select: 'name email' } })
+      .populate('approvedBy', 'name email');
+
+    // Notify the student that their transfer was approved
+    await Notification.create({
+      userId: senderUser._id,
+      message: `Your transfer of $${transferAmount.toFixed(2)} has been approved by your parent.`,
+      type: 'transfer_approved',
+      transactionId: txId,
+    });
+
+    return res.status(200).json({
+      message: `Transfer of $${transferAmount.toFixed(2)} approved and completed successfully`,
+      transaction: updatedTx,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: 'Failed to approve transfer',
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Reject a pending student transfer — no money moved
+// @route   POST /api/parent/approvals/:txId/reject
+// @access  Private (Parent only)
+export const rejectTransfer = async (req, res) => {
+  try {
+    const { txId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(txId)) {
+      return res.status(400).json({ message: 'Invalid transaction ID' });
+    }
+
+    const tx = await Transaction.findById(txId).populate('from');
+
+    if (!tx) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    if (tx.status !== 'pending') {
+      return res.status(400).json({
+        message: `Transaction is already ${tx.status} and cannot be rejected`,
+      });
+    }
+
+    // Verify ownership
+    const senderUser = await User.findById(tx.from.userId);
+    if (
+      !senderUser ||
+      senderUser.role !== 'student' ||
+      !senderUser.parentId ||
+      senderUser.parentId.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({
+        message: 'You are not authorised to reject this transfer',
+      });
+    }
+
+    await Transaction.findByIdAndUpdate(txId, {
+      status: 'Rejected',
+      rejectedBy: req.user._id,
+    });
+
+    const updatedTx = await Transaction.findById(txId)
+      .populate({ path: 'from', populate: { path: 'userId', select: 'name email' } })
+      .populate({ path: 'to', populate: { path: 'userId', select: 'name email' } })
+      .populate('rejectedBy', 'name email');
+
+    // Notify the student that their transfer was rejected
+    await Notification.create({
+      userId: senderUser._id,
+      message: `Your transfer of $${tx.amount.toFixed(2)} has been rejected by your parent.`,
+      type: 'transfer_rejected',
+      transactionId: txId,
+    });
+
+    return res.status(200).json({
+      message: `Transfer of $${tx.amount.toFixed(2)} has been rejected. No money was moved.`,
+      transaction: updatedTx,
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      message: 'Failed to reject transfer',
       error: error.message,
     });
   }
